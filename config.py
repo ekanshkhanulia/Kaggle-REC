@@ -49,3 +49,12 @@ ITEM_TEXT_COLUMNS = [
     "description",
     "categories",
 ]
+
+
+
+# BPR matrix factorization (collaborative retrieval)
+
+BPR_FACTORS = 64          # embedding size for users and items
+BPR_ITERATIONS = 100      # training iterations
+BPR_LEARNING_RATE = 0.01  # how fast model learns
+BPR_REGULARIZATION = 0.01 # prevents overfitting

@@ -182,3 +182,55 @@ Note:
 1. Please use ACM double-column format (https://www.overleaf.com/latex/templates/association-for-computing-machinery-acm-sig-proceedings-template/bmvfhcdnxfty).
 
 2. Write a concise 3–4 page report (do not exceed 6 pages excluding references)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Dataset Description
+📁 Files
+Filename	Description
+train.csv	Historical user-item interactions for training
+test.csv	User IDs for which you must generate recommendations
+sample_submission.csv	Example submission format (CSV)
+item_meta.csv	Metadata for items (e.g., category, title)
+📄 Data Format
+🔹 train.csv / test.csv
+user_id,item_id,timestamp
+1,42,1690423400
+1,88,1690427500
+...
+Each row represents a positive user-item interaction (e.g., click or view)
+Timestamps are in Unix time (seconds) and can be used for sequential modeling
+🔹 item_meta.csv
+item_id,main_category,title, ...
+42864,"Industrial & Scientific","Stainless Steel Lab Beaker Set, 50/100/250/500/1000ml ...", ...
+61600,"Industrial & Scientific","Digital Multimeter TRMS 6000 Counts with NCV ...", ...
+...
+Use this file to enrich item representations, build hybrid models, or support content-aware recommendations
+Usage of this file is optional, but leveraging item-level semantic information may help you achieve better recommendation performance
+🔹 sample_submission.csv
+ID,user_id,item_id
+12,12,"6312,12419,6891,664,4243,8377,7962,6635,12842,4970"
+14,14,"7809,5867,9559,3579,8269,2282,4618,2290,12384,1554"
+...
+Each user_id must have exactly 10 comma-separated item_ids
+ID is the identifier of each test instance, which should be the same as user_id
+❗️❗️❗️ You are only required to generate predictions for the user_ids listed in sample_submission.csv. Do not generate predictions for other users in the submission file. ❗️❗️❗️
