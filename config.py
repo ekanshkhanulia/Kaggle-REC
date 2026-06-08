@@ -58,3 +58,11 @@ BPR_FACTORS = 64          # embedding size for users and items
 BPR_ITERATIONS = 100      # training iterations
 BPR_LEARNING_RATE = 0.01  # how fast model learns
 BPR_REGULARIZATION = 0.01 # prevents overfitting
+
+
+#TF-IDF content retrieval
+
+TFIDF_MAX_FEATURES = 20_000   # vocabulary size
+TFIDF_NGRAM_RANGE = (1, 2)    # unigrams and bigrams
+TFIDF_MIN_DF = 2              # ignore very rare words
+TFIDF_MAX_DF = 0.95           # ignore very common word
