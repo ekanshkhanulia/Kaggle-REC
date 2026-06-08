@@ -35,3 +35,79 @@ class TfidfRetriever:
 
         self.tfidf_matrix=None
 
+    def fit(self,item_text):
+        """Build TF-IDF vectors for all items."""
+
+        #step:list of all item ids sorted 
+        self.item_ids=sorted(item_text.index.astype(int).tolist())
+
+        #step item_id -> row index in tfidf matrix
+        self.item_index={}
+        for i in range(len(self.item_ids)): #item_ids = [42, 8912, 42864, 61600, etc]
+            item_id = self.item_ids[i] #i = 0  is  item_id = 42
+            self.item_index[item_id] = i
+
+        #step3 collect text in same order as item_ids
+        texts=[]
+        for item_id in self.item_ids:
+            texts.append(item_text[item_id])
+
+
+        # step convert texts to TF-IDF 
+        self.tfidf_matrix = self.vectorizer.fit_transform(texts)
+
+
+
+    def recommend(self,user_id,seen_items,k=config.TOP_K):
+        if len(seen_items) == 0:
+            return []
+
+        #step  collect TF-IDF vectors of items user clicked
+        vectors=[]
+        for item_id in seen_items:
+            if item_id in self.item_index:
+                row_idx=self.item_index[item_id]
+                vectors.append(self.tfidf_matrix[row_idx])
+
+
+        if len(vectors) == 0:
+            return []
+
+        # step : average them into one user profile vector
+        user_profile=vectors[0]
+        for j in range(1, len(vectors)):
+            user_profile = user_profile + vectors[j] #vectors[0] = [0.0, 0.6, 0.0, 0.0, 0.4] # steel beaker digital multimeter lab
+        user_profile = user_profile / len(vectors)
+
+        # step cosine similarity  profile vs every item
+        scores = cosine_similarity(user_profile, self.tfidf_matrix).flatten()
+        
+        # step  rank items by score, skip seen, take top k
+        ranked_indices = np.argsort(-scores)
+        recommendations = []
+        for idx in ranked_indices:
+            item_id = self.item_ids[idx]
+            if item_id in seen_items:
+                continue
+            recommendations.append(item_id)
+            if len(recommendations) == k:
+                break
+        return recommendations
+
+    def recommend_all(self, user_ids, seen_items, k=config.TOP_K):
+        all_recommendations = {}
+        for user_id in user_ids:
+            user_seen = seen_items.get(user_id, set())
+            recs = self.recommend(user_id, user_seen, k)
+            all_recommendations[user_id] = recs
+        return all_recommendations
+
+
+
+        
+
+
+
+
+
+
