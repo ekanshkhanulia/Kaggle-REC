@@ -7,42 +7,35 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import scipy.sparse as sp  #for sparse matrix
-from implicit.bpr import BayesianPersonalizedRanking
 
 import config
 
 
 class BPRRetriever:
+    """
+    BPR 
+     idea is it is pairwise
+      For user u, positive item i, negative item j:
+        we want score(u,i) > score(u,j)
+    score(u, i) = dot(user_embedding[u], item_embedding[i])
+    """
+
+
     def __init__(self):
-        #bpr model for implicit lib
-        #factor is  embedding size (how many dimensions per user/item vector)
-
-        self.model=BayesianPersonalizedRanking(
-            factors=config.BPR_FACTORS,
-            iterations=config.BPR_ITERATIONS,
-            learning_rate=config.BPR_LEARNING_RATE,
-            regularization=config.BPR_REGULARIZATION,
-            random_state=config.RANDOM_SEED,
-            
-        )
-
         # mappings between original ids and matrix indices like 0,1 ,2 etc
         #bpr need continuos ids for matrix factorization not original ids
         self.user_map:dict[int,int]={}
         self.item_map:dict[int,int]={}
         self.item_inv: dict[int, int] = {}   # matrix col index → item_id (reverse)
-        
-        # sparse user-item matrix (built during fit)
-        self.user_item_matrix = None
+
+        # learned embeddings (built during fit)
+        self.user_factors = None
+        self.item_factors = None
+        self.user_pos_items = {}
 
     def fit(self,train_df:pd.DataFrame) -> None:
         """
-        Build user-item matrix and train BPR.
-        
-        - Map user_ids and item_ids to contiguous indices (0,1,2...)
-        - Build sparse user-item matrix (1 where user clicked item)
-        - Train BPR on item-user matrix (implicit expects item-user)
+        Map ids, build user positive sets, train BPR embeddings from scratch.
         """
 
         #step -build mapping: row id to matrix index
@@ -62,30 +55,51 @@ class BPRRetriever:
             self.item_inv[i]=iid
 
 
-        # Step convert each row's user_id/item_id to  indices
-        rows = train_df[config.COL_USER_ID].map(self.user_map).values  # user indices so exmaple 3664  → 0 
-        cols = train_df[config.COL_ITEM_ID].map(self.item_map).values  # item indices
-        data = np.ones(len(rows), dtype=np.float32)                    # 1 
-
-        
-        
-        
-        
         n_users = len(unique_users)
         n_items = len(unique_items)
 
-        #build sparse user-item matrix
-        self.user_item_matrix=sp.csr_matrix((data,(rows,cols)),
-        shape=(n_users,n_items))
+        self.user_pos_items = {}
+        for u in range(n_users):
+            self.user_pos_items[u] = set() #created an empty set for each user
+
+        for _, row in train_df.iterrows():
+            u_idx = self.user_map[row[config.COL_USER_ID]]  #map converts to index
+            i_idx = self.item_map[row[config.COL_ITEM_ID]]
+            self.user_pos_items[u_idx].add(i_idx) #this user's set of clicked items
+
+        factors = config.BPR_FACTORS
+        rng = np.random.default_rng(42)
+        self.user_factors = rng.normal(0, 0.01, size=(n_users, factors)).astype(np.float32) # a list of numbers that describes each user # filling a matrix with small random numbers
+        self.item_factors = rng.normal(0, 0.01, size=(n_items, factors)).astype(np.float32)
+
+        #training loop
+        lr = config.BPR_LEARNING_RATE
+        reg = config.BPR_REGULARIZATION
+        for _ in range(config.BPR_ITERATIONS):
+            for u, pos_items in self.user_pos_items.items(): #  e.g user 0 clicked items 5, 12, 8
+                for i in pos_items:
+                    j = int(rng.integers(0, n_items)) # random negative item index
+                    while j in pos_items: # make sure it's not a positive item
+                        j = int(rng.integers(0, n_items))
+                    self._bpr_step(u, i, j, lr, reg)
+
+    def _bpr_step(self, u: int, i: int, j: int, lr: float, reg: float) -> None:
+        user = self.user_factors[u]
+        pos = self.item_factors[i]
+        neg = self.item_factors[j]
+
+        score_pos = np.dot(user, pos) #user's taste vector and the item's profile vector, Multiply each matching pair
+        score_neg = np.dot(user, neg)
+        x_uij = score_pos - score_neg 
+        #Turns the score gap into a push strength between 0 and 1
+        sigmoid_neg = 1.0 / (1.0 + np.exp(x_uij))
 
 
-        #step
-        item_user=self.user_item_matrix.T.tocsr()
+        #update the vectors
 
-
-        #train bpr
-
-        self.model.fit(item_user)
+        self.user_factors[u] += lr * (sigmoid_neg * (pos - neg) - reg * user)
+        self.item_factors[i] += lr * (sigmoid_neg * user - reg * pos)
+        self.item_factors[j] += lr * (sigmoid_neg * (-user) - reg * neg)
 
 
     def recommend(self,
@@ -96,10 +110,8 @@ class BPRRetriever:
         """
         Generate top-K item recommendations for 1 user.
         
-        - Convert user_id to matrix index
-        - Ask BPR model for top-K items
-        - Filter already-seen items
-        - Convert matrix indices back to real item_ids
+        - Score all items with dot(user_embedding, item_embedding)
+        - Return top-K unseen items
         """
 
         # step:
@@ -110,25 +122,11 @@ class BPRRetriever:
         user_idx=self.user_map[user_id]
 
 
-        #step
-        #bpr recommendation
-        # model.recommend returns (item_indices, scores) for this user
-        item_indices,scores=self.model.recommend(
-            user_idx,
-            self.user_item_matrix[user_idx],
-            N=k + len(seen_items), #caue seen items can be in the ,matirx so we need extra
-            filter_already_liked_items=True,  # skip items user already clicked
-        )
+        scores = self.item_factors @ self.user_factors[user_idx]
+        ranked_indices = np.argsort(-scores)
 
-
-
-
-        #step
-        #convert matrix indices back to real item_ids
-
-        # Step  convert indices back to item_ids, skip seen items
         recommendations = []
-        for idx in item_indices:
+        for idx in ranked_indices:
             item_id = self.item_inv[idx]       # matrix index → real item_id
             if item_id in seen_items:          # double-check seen filter
                 continue

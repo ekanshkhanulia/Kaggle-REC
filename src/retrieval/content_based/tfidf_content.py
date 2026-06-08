@@ -29,4 +29,9 @@ class TfidfRetriever:
 
         #item_id-> row index in tfidf matrix
         self.item_ids:list[int]=[]
-        
+        self.item_index: dict[int, int] = {}  # item_id to row index
+
+
+
+        self.tfidf_matrix=None
+
