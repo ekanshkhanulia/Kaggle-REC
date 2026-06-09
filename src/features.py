@@ -1,5 +1,5 @@
 """
-features.py — data loading and preprocessing. 
+features.py, data loading and preprocessing
 """
 
 from __future__ import annotations # lets us write dict[int, list[int]] without quotes
@@ -83,6 +83,16 @@ def get_test_users()-> list[int]:
     return sub[config.COL_USER_ID].astype(int).unique().tolist()
 
 
+def get_test_targets(test_users: list[int]) -> dict[int, list[int]]:
+    # item ids from test.csv per user, local scoring only not for training
+    test_df = pd.read_csv(config.TEST_PATH)
+    test_df = test_df[test_df[config.COL_USER_ID].isin(test_users)]
+    targets: dict[int, list[int]] = {}
+    for user_id, group in test_df.groupby(config.COL_USER_ID, sort=False):
+        targets[int(user_id)] = group[config.COL_ITEM_ID].astype(int).tolist()
+    return targets
+
+
 def temporal_train_val_split(train:pd.DataFrame,) -> tuple[pd.DataFrame,dict[int,list[int]]]:
 
     train_rows:list[pd.DataFrame]=[] #traing
@@ -116,20 +126,29 @@ def load_all() -> dict:
     train = load_train()                              # load + sort train.csv
     meta = load_item_meta()                           # load item_meta.csv
     item_text = build_item_text(meta)                 # one text string per item
-    histories = get_user_histories(train)             # user → ordered click list
-    seen_items = get_user_seen_items(histories)       # user → set of clicked items
-    test_users = get_test_users()                     # users to predict for
-    train_split, val_targets = temporal_train_val_split(train)  # split train/val 
+    test_users = get_test_users()
+    test_targets = get_test_targets(test_users)
+    train_split, val_targets = temporal_train_val_split(train)
+
+    # full train history for submit/test, filter all past clicks
+    histories = get_user_histories(train)
+    seen_items = get_user_seen_items(histories)
+
+    # train_split only for val, dont put val holdout in seen or recall goes fake low
+    val_histories = get_user_histories(train_split)
+    val_seen_items = get_user_seen_items(val_histories)
 
     return {
-        "train":train,
-        "train_split":train_split,
-        "val_targets":val_targets,
-        "meta":meta,
-        "item_text":item_text,
+        "train": train,
+        "train_split": train_split,
+        "val_targets": val_targets,
+        "meta": meta,
+        "item_text": item_text,
         "histories": histories,
         "seen_items": seen_items,
+        "val_seen_items": val_seen_items,
         "test_users": test_users,
+        "test_targets": test_targets,
     }
 
 if __name__ == "__main__":

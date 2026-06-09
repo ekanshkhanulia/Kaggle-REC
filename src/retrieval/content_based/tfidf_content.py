@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import joblib
 import numpy as np
 import config
 
@@ -35,8 +36,14 @@ class TfidfRetriever:
 
         self.tfidf_matrix=None
 
-    def fit(self,item_text):
+    def fit(self,item_text, resume: bool = True):
         """Build TF-IDF vectors for all items."""
+
+        # save resume, skip if already on disk
+        if resume and config.TFIDF_MODEL_PATH.exists():
+            print(f"Loading saved TF-IDF from {config.TFIDF_MODEL_PATH}")
+            self.load(config.TFIDF_MODEL_PATH)
+            return
 
         #step:list of all item ids sorted 
         self.item_ids=sorted(item_text.index.astype(int).tolist())
@@ -56,7 +63,29 @@ class TfidfRetriever:
         # step convert texts to TF-IDF 
         self.tfidf_matrix = self.vectorizer.fit_transform(texts)
 
+        # save resume write to artifacts so next run skips
+        self.save(config.TFIDF_MODEL_PATH)
+        print(f"TF-IDF saved to {config.TFIDF_MODEL_PATH}")
 
+    def save(self, path) -> None:
+        # save resume dump vectorizer + matrix
+        joblib.dump(
+            {
+                "vectorizer": self.vectorizer,
+                "item_ids": self.item_ids,
+                "item_index": self.item_index,
+                "tfidf_matrix": self.tfidf_matrix,
+            },
+            path,
+        )
+
+    def load(self, path) -> None:
+        # save resume load back from artifacts
+        data = joblib.load(path)
+        self.vectorizer = data["vectorizer"]
+        self.item_ids = data["item_ids"]
+        self.item_index = data["item_index"]
+        self.tfidf_matrix = data["tfidf_matrix"]
 
     def recommend(self,user_id,seen_items,k=config.TOP_K):
         if len(seen_items) == 0:
@@ -101,13 +130,3 @@ class TfidfRetriever:
             recs = self.recommend(user_id, user_seen, k)
             all_recommendations[user_id] = recs
         return all_recommendations
-
-
-
-        
-
-
-
-
-
-

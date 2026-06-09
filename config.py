@@ -3,14 +3,14 @@
 from pathlib import Path
 
 
-#PROJECT ROOT -------------
+#PROJECT ROOT ----
 
 
 #root folder
 PROJECT_ROOT=Path(__file__).resolve().parent
 
 
-# Local data folder (gitignored — download  data form Kaggle  )
+# Local data folder (gitignored, download  data form Kaggle  )
 DATA_DIR = PROJECT_ROOT / "Data"
 TRAIN_PATH = DATA_DIR / "train.csv"
 TEST_PATH = DATA_DIR / "test.csv"
@@ -18,19 +18,32 @@ ITEM_META_PATH = DATA_DIR / "item_meta.csv"
 SAMPLE_SUBMISSION_PATH = DATA_DIR / "sample_submission.csv"
 
 
+# saved models / checkpoints
+ARTIFACTS_DIR = PROJECT_ROOT / "artifacts"
+# dev bpr, trained on 80% split, used for --mode val
+BPR_CHECKPOINT_PATH = ARTIFACTS_DIR / "bpr_checkpoint.npz"
+BPR_MODEL_PATH = ARTIFACTS_DIR / "bpr_model.npz"
+# final bpr, full train.csv, used for test + submit
+BPR_FULL_CHECKPOINT_PATH = ARTIFACTS_DIR / "bpr_full_checkpoint.npz"
+BPR_FULL_MODEL_PATH = ARTIFACTS_DIR / "bpr_full_model.npz"
+TFIDF_MODEL_PATH = ARTIFACTS_DIR / "tfidf_model.joblib"
+
+ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+
 #  submission CSV and other outputs 
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
 SUBMISSION_PATH = OUTPUT_DIR / "submission.csv"
 
 
-#EVALUATION & SUBMISSION---------------
+#EVALUATION & SUBMISSION-------
 
 TOP_K=10 #Recall@10
+RANDOM_SEED=42
 
-# Last fraction of each user's history held out for validation (by timestamp)
+# last chunk of each user history held out for val (by time)
 VAL_HOLDOUT_RATIO=0.2
 
-# Users with fewer interactions stay fully in train (no val rows)
+# users with too few clicks stay all in train no val row
 MIN_USER_INTERACTIONS_FOR_VAL=5
 
 
