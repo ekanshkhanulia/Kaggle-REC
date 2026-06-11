@@ -282,3 +282,23 @@ class BPRRetriever:
             recs = self.recommend(user_id, user_seen, k)
             all_recommendations[user_id] = recs
         return all_recommendations
+    
+    def score_candidates(self, user_id: int, item_ids: list[int])-> np.ndarray:
+        """
+        Score candidate items for a user. 
+        Used by reranker to get BPR's score for candidates from other retrievers.
+        """
+        # for a cold start user, reranker will treat NaN as missing
+        if user_id not in self.user_map:
+            return np.full(len(item_ids), np.nan, dtype=np.float32)
+        
+        u_idx = self.user_map[user_id]
+        user_vec = self.user_factors[u_idx]
+
+        scores = np.full(len(item_ids), np.nan, dtype=np.float32)
+        for k, item_id in enumerate(item_ids):
+            if item_id in self.item_map:
+                i_idx = self.item_map[item_id]
+                scores[k] = np.dot(user_vec, self.item_factors[i_idx])
+        
+        return scores
