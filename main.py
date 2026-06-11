@@ -9,6 +9,7 @@ Run from project root:
   python main.py --mode train_bpr
   python main.py --mode train_tfidf
   python main.py --mode train_bpr --full
+  
 """
 
 from __future__ import annotations
@@ -19,7 +20,11 @@ import config
 from src.features import load_all
 from src.retrieval.collaborative.bpr_matrix import BPRRetriever
 from src.retrieval.content_based.tfidf_content import TfidfRetriever
-
+from src.reranking.data_prep import *
+from src.reranking.lgbm import LightGBMReranker
+from src.reranking.catboost_ranker import CatBoostReranker
+from src.metrics import recall_at_k
+from src.reranking.cooccurrence import build_item_item_similarity
 
 def clear_bpr_artifacts(model_path, checkpoint_path) -> None:
     # delete old model/checkpoint/loss so retrain starts clean
@@ -75,25 +80,284 @@ def run_train_tfidf(data: dict, force: bool = False) -> None:
     tfidf.fit(data["item_text"], resume=not force)
     print(f"Done. TF-IDF saved to {config.TFIDF_MODEL_PATH}")
 
+def run_train_reranker(data: dict, reranker_name: str, force: bool = False) -> None:
+    """Train the reranker on val_users using dev BPR (80% train)."""
+    print(f"Mode: train_reranker ({reranker_name})")
+
+    # try cache first
+    train_df = None if force else load_df(config.RERANKER_TRAIN_DF_PATH)
+
+    if train_df is None:
+        # cache miss -> load fitted retrievers (dev BPR for training) + build dataset
+        bpr = BPRRetriever()
+        bpr.fit(data["train_split"], resume=True,
+                model_path=config.BPR_MODEL_PATH,
+                checkpoint_path=config.BPR_CHECKPOINT_PATH)
+        tfidf = TfidfRetriever()
+        tfidf.fit(data["item_text"], resume=True)
+
+        # precompute feature lookups from train_split
+        item_feats = build_item_features(data["meta"], data["train_split"])
+        user_feats = build_user_features(data["train_split"], item_feats)
+
+        print("Building item-item co-occurrence matrix...")
+        item_item_sim, item_to_idx_cooc = build_item_item_similarity(data["train_split"])
+
+        # build training dataset for the reranker
+        print("Building reranker training data...")
+        train_df = build_reranker_dataset(
+            users=list(data["val_targets"].keys()),
+            bpr=bpr, tfidf=tfidf,
+            seen_items=data["val_seen_items"],
+            item_features=item_feats,
+            user_features=user_feats,
+            item_item_sim=item_item_sim,
+            item_to_idx_cooc=item_to_idx_cooc,
+            labels=data["val_targets"],
+            k_retrieval=config.K_RETRIEVAL,
+        )
+        save_df(train_df, config.RERANKER_TRAIN_DF_PATH)
+    
+    print(f"Training rows: {len(train_df)}  positives: {train_df['label'].sum()}")
+
+    # Drop user-groups with no positive candidates (groups with no positives provide no useful comparison signal, tested )
+    users_with_positives = (train_df.groupby("user_id")["label"].max().pipe(lambda s: s[s == 1].index).tolist())
+    print(
+        f"Filtering to user-groups with at least 1 positive: "
+        f"{len(users_with_positives):,} / {train_df['user_id'].nunique():,} users kept"
+    )
+    train_df = train_df[train_df["user_id"].isin(users_with_positives)].reset_index(drop=True)
+    print(f"Training rows after filter: {len(train_df):,}")
+
+    # train the chosen reranker
+    if reranker_name == "lgbm":
+        reranker = LightGBMReranker()
+        model_path = config.LGBM_MODEL_PATH
+    elif reranker_name == "catboost":
+        reranker = CatBoostReranker()
+        model_path = config.CATBOOST_MODEL_PATH
+    else:
+        raise ValueError(f"Unknown reranker: {reranker_name}")
+
+    if force and model_path.exists():
+        model_path.unlink()
+
+    reranker.fit(train_df)
+    reranker.save(model_path)
+    print(f"Reranker saved to {model_path}")
+
+def get_inference_df(data: dict, force: bool = False):
+    """
+    Build (or load from cache) the reranker inference DataFrame.
+    Uses full BPR (100% train), no labels.
+    """
+    if not force:
+        df = load_df(config.RERANKER_INFERENCE_DF_PATH)
+        if df is not None:
+            return df
+
+    print("Loading retrievers (full BPR)...")
+    bpr = BPRRetriever()
+    bpr.fit(data["train"], resume=True,
+            model_path=config.BPR_FULL_MODEL_PATH,
+            checkpoint_path=config.BPR_FULL_CHECKPOINT_PATH)
+    tfidf = TfidfRetriever()
+    tfidf.fit(data["item_text"], resume=True)
+
+    print("Building feature lookups on full train...")
+    item_feats = build_item_features(data["meta"], data["train"])
+    user_feats = build_user_features(data["train"], item_feats)
+
+    print("Building item-item co-occurrence matrix...")
+    item_item_sim, item_to_idx_cooc = build_item_item_similarity(data["train"])
+
+    print(f"Building inference dataset for {len(data['test_users']):,} users...")
+    df = build_reranker_dataset(
+        users=data["test_users"],
+        bpr=bpr, tfidf=tfidf,
+        seen_items=data["seen_items"],     # full-train-based seen
+        item_features=item_feats,
+        user_features=user_feats,
+        item_item_sim=item_item_sim,
+        item_to_idx_cooc=item_to_idx_cooc,
+        labels=None,                       # no labels at inference
+        k_retrieval=config.K_RETRIEVAL,
+    )
+    save_df(df, config.RERANKER_INFERENCE_DF_PATH)
+
+    return df
+
+def top10_per_user(df, scores) -> dict[int, list[int]]:
+    """
+    Pick top-10 candidates per user, sorted by score desc.
+    """
+    scored = df[["user_id", "item_id"]].copy()
+    scored["score"] = scores
+    scored = scored.sort_values(["user_id", "score"], ascending=[True, False])
+    top10 = (scored.groupby("user_id", sort=False)["item_id"].apply(lambda s: s.head(10).tolist()).to_dict())
+
+    return top10
+
+def run_evaluate(data: dict, reranker_name: str, force: bool = False) -> None:
+    """
+    Local Recall@10 on the test set, using:
+      - full BPR (trained on 100% train)
+      - TF-IDF
+      - trained reranker (lgbm or catboost)
+    """
+
+    print(f"Mode: evaluate ({reranker_name})")
+
+    df = get_inference_df(data, force=force)
+    print(f"Inference df: {len(df):,} rows, {df['user_id'].nunique():,} users")
+
+    # load reranker and score
+    if reranker_name == "lgbm":
+        reranker = LightGBMReranker()
+        reranker.load(config.LGBM_MODEL_PATH)
+    elif reranker_name == "catboost":
+        reranker = CatBoostReranker()
+        reranker.load(config.CATBOOST_MODEL_PATH)
+    else:
+        raise ValueError(f"Unknown reranker: {reranker_name}")
+
+    print("Scoring with reranker...")
+    scores = reranker.predict(df)
+
+    print("Picking top-10 per user...")
+    top10 = top10_per_user(df, scores)
+
+    recall = recall_at_k(top10, data["test_targets"], k=config.TOP_K)
+    print(f"Reranker Recall@{config.TOP_K}: {recall:.4f}")
+
+def run_compare_baselines(data: dict, reranker_name: str) -> None:
+    """
+    Compare on test_targets:
+      - Popularity (most-interacted items)
+      - TF-IDF alone
+      - BPR alone (full)
+      - Pipeline (full BPR + TF-IDF + reranker)
+    """
+
+    print("Mode: compare_baselines\n")
+
+    # popularity
+    popular = (data["train"][config.COL_ITEM_ID].value_counts().head(50).index.tolist())
+    pop_recs = {}
+    for u in data["test_users"]:
+        seen = data["seen_items"].get(u, set())
+        pop_recs[u] = [i for i in popular if i not in seen][:10]
+    pop_recall = recall_at_k(pop_recs, data["test_targets"], k=10)
+
+    # BPR alone (full)
+    bpr = BPRRetriever()
+    bpr.fit(data["train"], resume=True,
+            model_path=config.BPR_FULL_MODEL_PATH,
+            checkpoint_path=config.BPR_FULL_CHECKPOINT_PATH)
+    bpr_recs = bpr.recommend_all(data["test_users"], data["seen_items"], k=10)
+    bpr_recall = recall_at_k(bpr_recs, data["test_targets"], k=10)
+
+    # TF-IDF alone
+    tfidf = TfidfRetriever()
+    tfidf.fit(data["item_text"], resume=True)
+    tfidf_recs = tfidf.recommend_all(data["test_users"], data["seen_items"], k=10)
+    tfidf_recall = recall_at_k(tfidf_recs, data["test_targets"], k=10)
+
+    # pipeline: read cached inference df + load reranker.
+    df = pd.read_parquet(config.RERANKER_INFERENCE_DF_PATH)
+    reranker = LightGBMReranker()
+    if reranker_name == "lgbm":
+        reranker.load(config.LGBM_MODEL_PATH)
+    elif reranker_name == "catboost":
+        reranker = CatBoostReranker()
+        reranker.load(config.CATBOOST_MODEL_PATH)
+
+    scores = reranker.predict(df)
+    scored = df[["user_id", "item_id"]].assign(score=scores)
+    scored = scored.sort_values(["user_id", "score"], ascending=[True, False])
+    pipeline_recs = (scored.groupby("user_id", sort=False)["item_id"].apply(lambda s: s.head(10).tolist()).to_dict())
+    pipeline_recall = recall_at_k(pipeline_recs, data["test_targets"], k=10)
+
+    # print table
+    print(f"{'Method':30s} {'Recall@10':>10s}")
+    print("-" * 42)
+    print(f"{'Popularity':30s} {pop_recall:>10.4f}")
+    print(f"{'TF-IDF alone':30s} {tfidf_recall:>10.4f}")
+    print(f"{'BPR alone':30s} {bpr_recall:>10.4f}")
+    print(f"{f'Pipeline ({reranker_name})':30s} {pipeline_recall:>10.4f}")
+
+def run_submit(data: dict, reranker_name: str, force: bool = False) -> None:
+    """
+    Generate submission.csv for Kaggle.
+    """
+    print(f"Mode: submit ({reranker_name})")
+
+    df = get_inference_df(data, force=force)
+
+    # load reranker
+    if reranker_name == "lgbm":
+        reranker = LightGBMReranker()
+        reranker.load(config.LGBM_MODEL_PATH)
+    elif reranker_name == "catboost":
+        reranker = CatBoostReranker()
+        reranker.load(config.CATBOOST_MODEL_PATH)
+    else:
+        raise ValueError(f"Unknown reranker: {reranker_name}")
+
+    print("Scoring with reranker...")
+    scores = reranker.predict(df)
+
+    print("Picking top-10 per user...")
+    top10 = top10_per_user(df, scores)
+
+    # build submission df matching the sample format:
+    #   ID, user_id, item_id="i1,i2,...,i10"
+    rows = []
+    for user_id in data["test_users"]:
+        items = top10.get(user_id, [])
+        if len(items) != 10:
+            raise ValueError(
+                f"User {user_id} has {len(items)} recommendations, expected 10. "
+                f"Check candidate pool / reranker output."
+            )
+        if len(set(items)) != 10:
+            raise ValueError(
+                f"User {user_id} has duplicate items in top-10: {items}"
+            )
+        rows.append({
+            "ID": user_id,
+            "user_id": user_id,
+            "item_id": ",".join(str(i) for i in items[:10]),
+        })
+
+    sub = pd.DataFrame(rows)
+    sub.to_csv(config.SUBMISSION_PATH, index=False)
+    print(f"Submission written to {config.SUBMISSION_PATH}  ({len(sub):,} users)")
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Hybrid BPR + TF-IDF ")
     parser.add_argument(
         "--mode",
-        choices=["train_bpr", "train_tfidf"],
+        choices=["train_bpr", "train_tfidf", "train_reranker", "evaluate", "compare_baselines", "submit"],
         default="train_bpr",
-        help="train_bpr | train_tfidf",
+        help="train_bpr | train_tfidf | train_reranker | evaluate | compare_baselines | submit",
     )
     parser.add_argument(
         "--full",
         action="store_true",
-        help="with train_bpr train on 100% train.csv, default is 80% split for val",
+        help="with train_bpr train on 100%% train.csv, default is 80%% split for val",
     )
     parser.add_argument(
         "--force",
         action="store_true",
         help="with train_bpr or train_tfidf delete old artifacts and retrain from scratch",
     )
+    parser.add_argument(
+        "--reranker",
+        choices=["lgbm", "catboost"],
+        default="lgbm",
+        help="lgbm | catboost",
+)
     args = parser.parse_args()
 
     print("Loading data")
@@ -101,9 +365,19 @@ def main() -> None:
 
     if args.mode == "train_bpr":
         run_train_bpr(data, full=args.full, force=args.force)
-    else:
+    elif args.mode == "train_tfidf":
         run_train_tfidf(data, force=args.force)
-
+    elif args.mode == "train_reranker":
+        run_train_reranker(data, reranker_name=args.reranker, force=args.force)
+    elif args.mode == "evaluate":
+        run_evaluate(data, reranker_name=args.reranker, force=args.force)
+    elif args.mode == "compare_baselines":
+        run_compare_baselines(data, args.reranker)
+    elif args.mode == "submit":
+        run_submit(data, reranker_name=args.reranker, force=args.force)
 
 if __name__ == "__main__":
     main()
+
+# python main.py --mode train_bpr --force ; python main.py --mode train_bpr --full --force
+# python main.py --mode train_reranker --reranker lgbm --force ; python main.py --mode evaluate --reranker lgbm --force
