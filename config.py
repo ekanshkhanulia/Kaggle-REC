@@ -68,7 +68,7 @@ ITEM_TEXT_COLUMNS = [
 # BPR matrix factorization (collaborative retrieval)
 
 BPR_FACTORS = 64          # embedding size for users and items
-BPR_ITERATIONS = 100      # training iterations
+BPR_ITERATIONS = 150      # training iterations
 BPR_LEARNING_RATE = 0.01  # how fast model learns
 BPR_REGULARIZATION = 0.01 # prevents overfitting
 
@@ -79,3 +79,31 @@ TFIDF_MAX_FEATURES = 20_000   # vocabulary size
 TFIDF_NGRAM_RANGE = (1, 2)    # unigrams and bigrams
 TFIDF_MIN_DF = 2              # ignore very rare words
 TFIDF_MAX_DF = 0.95           # ignore very common word
+
+# Reranking
+
+K_RETRIEVAL = 500  # candidates per retriever before union
+META_COLS = ["user_id", "item_id", "label"] # columns in the reranker dataframe that are NOT features
+CAT_COLS = ["main_category", "user_dominant_category"] # string-valued columns that should be treated as categorical by the tree
+RERANKER_TRAIN_DF_PATH = ARTIFACTS_DIR / "reranker_train_df.parquet"
+RERANKER_INFERENCE_DF_PATH = ARTIFACTS_DIR / "reranker_inference_df.parquet"
+SUBMISSION_PATH = ARTIFACTS_DIR / "submission.csv"
+
+
+# LGBM
+
+LGBM_MODEL_PATH = ARTIFACTS_DIR / "lgbm_reranker.joblib"
+LGBM_OBJECTIVE="lambdarank"
+LGBM_METRIC="ndcg"
+LGBM_N_ESTIMATORS=500
+LGBM_LR=0.05
+LGBM_NUM_LEAVES=63
+LGBM_MIN_CHILD_SAMPLES=20
+
+# CatBoost
+
+CATBOOST_MODEL_PATH = ARTIFACTS_DIR / "catboost_reranker.cbm"
+CATBOOST_LOSS = "YetiRank"
+CATBOOST_ITER = 500
+CATBOOST_LR = 0.05
+CATBOOST_DEPTH = 6
