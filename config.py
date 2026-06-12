@@ -27,6 +27,7 @@ BPR_MODEL_PATH = ARTIFACTS_DIR / "bpr_model.npz"
 BPR_FULL_CHECKPOINT_PATH = ARTIFACTS_DIR / "bpr_full_checkpoint.npz"
 BPR_FULL_MODEL_PATH = ARTIFACTS_DIR / "bpr_full_model.npz"
 TFIDF_MODEL_PATH = ARTIFACTS_DIR / "tfidf_model.joblib"
+BM25_MODEL_PATH = ARTIFACTS_DIR / "bm25_model.joblib"
 
 ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
 
