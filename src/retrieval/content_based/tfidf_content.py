@@ -36,7 +36,7 @@ class TfidfRetriever:
 
         self.tfidf_matrix=None
 
-    def fit(self, item_text, resume: bool = True):
+    def fit(self,item_text, resume: bool = True):
         """Build TF-IDF vectors for all items."""
 
         # save resume, skip if already on disk
@@ -87,7 +87,7 @@ class TfidfRetriever:
         self.item_index = data["item_index"]
         self.tfidf_matrix = data["tfidf_matrix"]
 
-    def recommend(self, user_id, seen_items, k=config.TOP_K):
+    def recommend(self,user_id,seen_items,k=config.TOP_K):
         if len(seen_items) == 0:
             return []
 
@@ -130,56 +130,3 @@ class TfidfRetriever:
             recs = self.recommend(user_id, user_seen, k)
             all_recommendations[user_id] = recs
         return all_recommendations
-    
-    def build_user_profile(self, seen_items: set[int]):
-        """
-        Build a user profile vector by averaging TF-IDF vectors of items the user clicked.
-        Returns sparse vector or None if user has no items with metadata.
-        """
-        vectors = []
-        for item_id in seen_items:
-            if item_id in self.item_index:
-                row_idx = self.item_index[item_id]
-                vectors.append(self.tfidf_matrix[row_idx])
-
-        if len(vectors) == 0:
-            return None
-
-        profile = vectors[0]
-        for j in range(1, len(vectors)):
-            profile = profile + vectors[j]
-        profile = profile / len(vectors)
-
-        return profile
-
-    def score_candidates(self, user_profile, item_ids: list[int]) -> np.ndarray:
-        """
-        Score candidate items against a precomputed user profile (from build_user_profile()).
-        Returns array of cosine similarity scores in same order as item_ids.
-        """
-        # user has no items with metadata -> return NaN for all
-        if user_profile is None:
-            return np.full(len(item_ids), np.nan, dtype=np.float32)
-
-        scores = np.full(len(item_ids), np.nan, dtype=np.float32)
-        
-        # gather rows for items with metadata in one pass
-        valid_positions = []
-        valid_rows = []
-        for k, item_id in enumerate(item_ids):
-            if item_id in self.item_index:
-                valid_positions.append(k)
-                valid_rows.append(self.item_index[item_id])
-
-        if not valid_rows:
-            return scores
-
-        # one cosine_similarity call on the entire batch
-        candidate_matrix = self.tfidf_matrix[valid_rows]
-        sims = cosine_similarity(user_profile, candidate_matrix).flatten()
-
-        for k, sim in zip(valid_positions, sims):
-            scores[k] = sim
-
-        return scores
-
