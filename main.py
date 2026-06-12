@@ -394,11 +394,104 @@ def run_train_bm25(data: dict, force: bool = False) -> None:
     bm25.fit(data["item_text"], resume=not force)
     print(f"Done. BM25 saved to {config.BM25_MODEL_PATH}")
 
+def ensemble_top10(data: dict, content: str, lgbm_weight: float, catboost_weight: float) -> dict[int, list[int]]:
+    df = get_inference_df(data, content=content, force=False)
+    print(f"Inference df: {len(df):,} rows, {df['user_id'].nunique():,} users")
+ 
+    # load both rerankers
+    print("Loading LightGBM...")
+    lgbm = LightGBMReranker()
+    lgbm.load(config.LGBM_MODEL_PATH)
+ 
+    print("Loading CatBoost...")
+    cat = CatBoostReranker()
+    cat.load(config.CATBOOST_MODEL_PATH)
+ 
+    print("Scoring with LightGBM...")
+    lgbm_scores = lgbm.predict(df)
+    print("Scoring with CatBoost...")
+    cat_scores = cat.predict(df)
+ 
+    # per-user min-max normalize each model's scores to [0, 1]
+    # (otherwise model with larger raw score range dominates the weighted sum)
+    scored = df[["user_id", "item_id"]].copy()
+    scored["lgbm"] = lgbm_scores
+    scored["catboost"] = cat_scores
+ 
+    def _per_user_minmax(g: "pd.Series") -> "pd.Series":
+        lo, hi = g.min(), g.max()
+        if hi == lo:
+            return g * 0.0      # all-equal scores → all zero (rare edge case)
+        return (g - lo) / (hi - lo)
+ 
+    print("Normalizing scores per user...")
+    scored["lgbm_norm"] = scored.groupby("user_id")["lgbm"].transform(_per_user_minmax)
+    scored["catboost_norm"] = scored.groupby("user_id")["catboost"].transform(_per_user_minmax)
+ 
+    # weighted combination
+    scored["combined"] = (lgbm_weight * scored["lgbm_norm"] + catboost_weight * scored["catboost_norm"])
+ 
+    # take top-10 per user
+    print("Picking top-10 per user...")
+    scored = scored.sort_values(["user_id", "combined"], ascending=[True, False])
+    top10 = (scored.groupby("user_id", sort=False)["item_id"].apply(lambda s: s.head(10).tolist()).to_dict())
+
+    return top10
+
+def run_ensemble_evaluate(data: dict, content: str = "tfidf", lgbm_weight: float = 0.5) -> None:
+    """
+    Evaluate ensemble of LightGBM + CatBoost on test_targets.
+    Weights are [lgbm_weight, 1 - lgbm_weight].
+    """
+    catboost_weight = 1.0 - lgbm_weight
+    print(
+        f"Mode: ensemble_evaluate  "
+        f"(LGBM weight={lgbm_weight}, CatBoost weight={catboost_weight})"
+    )
+ 
+    top10 = ensemble_top10(data, content, lgbm_weight, catboost_weight)
+    recall = recall_at_k(top10, data["test_targets"], k=config.TOP_K)
+    print(f"\nEnsemble Recall@{config.TOP_K}: {recall:.4f}")
+ 
+  
+def run_ensemble_submit(data: dict, content: str = "tfidf", lgbm_weight: float = 0.5) -> None:
+    """Generate submission.csv from the ensemble."""
+    catboost_weight = 1.0 - lgbm_weight
+    print(
+        f"Mode: ensemble_submit  "
+        f"(LGBM weight={lgbm_weight}, CatBoost weight={catboost_weight})"
+    )
+ 
+    top10 = ensemble_top10(data, content, lgbm_weight, catboost_weight)
+ 
+    rows = []
+    for user_id in data["test_users"]:
+        items = top10.get(user_id, [])
+        if len(items) != 10:
+            raise ValueError(
+                f"User {user_id} has {len(items)} recommendations, expected 10."
+            )
+        if len(set(items)) != 10:
+            raise ValueError(
+                f"User {user_id} has duplicate items in top-10: {items}"
+            )
+        rows.append({
+            "ID": user_id,
+            "user_id": user_id,
+            "item_id": ",".join(str(i) for i in items),
+        })
+ 
+    sub = pd.DataFrame(rows)
+    sub.to_csv(config.SUBMISSION_PATH, index=False)
+    print(f"Submission written to {config.SUBMISSION_PATH}  ({len(sub):,} users)")
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Hybrid BPR + TF-IDF ")
     parser.add_argument(
         "--mode",
-        choices=["train_bpr", "train_tfidf", "train_bm25", "train_reranker", "evaluate", "compare_baselines", "submit"],
+        choices=["train_bpr", "train_tfidf", "train_bm25",
+                  "train_reranker", "evaluate", "compare_baselines", "submit",
+                  "ensemble_evaluate", "ensemble_submit"],
         default="train_bpr",
         help="train_bpr | train_tfidf | train_bm25 | train_reranker | evaluate | compare_baselines | submit",
     )
@@ -424,10 +517,18 @@ def main() -> None:
         default="tfidf",
         help="content retriever for hybrid pipeline, tfidf or bm25",
     )
+    parser.add_argument(
+        "--lgbm-weight",
+        type=float,
+        default=0.5,
+        help="weight for LightGBM in the ensemble; catboost gets (1 - this)",
+    )
     args = parser.parse_args()
 
     print("Loading data")
     data = load_all()
+    print("Data loaded, dispatching mode", flush=True)
+    print(f"args.mode = {args.mode!r}", flush=True)
 
     if args.mode == "train_bpr":
         run_train_bpr(data, full=args.full, force=args.force)
@@ -443,6 +544,11 @@ def main() -> None:
         run_compare_baselines(data, args.reranker, content=args.content)
     elif args.mode == "submit":
         run_submit(data, reranker_name=args.reranker, content=args.content, force=args.force)
+    elif args.mode == "ensemble_evaluate":
+        print("Entering run_ensemble_evaluate", flush=True)
+        run_ensemble_evaluate(data, content=args.content, lgbm_weight=args.lgbm_weight)
+    elif args.mode == "ensemble_submit":
+        run_ensemble_submit(data, content=args.content, lgbm_weight=args.lgbm_weight)
 
 if __name__ == "__main__":
     main()
