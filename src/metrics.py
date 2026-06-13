@@ -22,3 +22,19 @@ k:int=config.TOP_K,)-> float: #list of recommendation, values of hidden items, k
         scores.append(recall)
         # return average recall across all users
     return sum(scores) / len(scores) if scores else 0.0
+
+
+def candidate_recall(
+    candidates_by_user: dict[int, set[int]],
+    val_targets: dict[int, list[int]],
+) -> float:
+    """Fraction of true items that appear anywhere in the candidate pool (per user, then averaged)."""
+    scores = []
+    for user_id, true_items in val_targets.items():
+        pool = candidates_by_user.get(user_id, set())
+        if not true_items:
+            scores.append(0.0)
+            continue
+        hits = len(set(true_items) & pool)
+        scores.append(hits / len(true_items))
+    return sum(scores) / len(scores) if scores else 0.0

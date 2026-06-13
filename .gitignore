@@ -1,2 +1,6 @@
 Data/
-
+artifacts/
+__pycache__/
+catboost_info/
+outputs/
+IMPLEMENTATION_LOG.md
